@@ -1,5 +1,6 @@
 # Constants
 $SampleInterval = 2
+$MaxNumberOfSamples = 60
 
 # Identify Discrete GPU
 $GPU = Get-WmiObject Win32_VideoController
@@ -46,7 +47,7 @@ $CounterSet.Add("\GPU Engine(*_${GPUId}_*_engtype_Compute)\Utilization Percentag
 $CounterSet.Add("\GPU Engine(*_${GPUId}_*_engtype_Copy)\Utilization Percentage")
 
 # Query Counters
-Get-Counter -Counter $CounterSet -Continuous -SampleInterval $SampleInterval -ErrorAction Stop | Foreach-Object {
+Get-Counter -Counter $CounterSet -MaxSamples $MaxNumberOfSamples -SampleInterval $SampleInterval -ErrorAction Stop | Foreach-Object {
 
     # Get Per Counter Values
     $ProcessorUsageValue = ($_.CounterSamples | Where-Object -Property Path -Match ".*processor information.*").CookedValue

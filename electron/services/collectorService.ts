@@ -6,6 +6,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const scriptPath = path.join(__dirname, '../../public/scripts/collector.ps1');
 
 export function runPowerShellScript() {
+  console.log('Running PowerShell script...');
   const ps = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass' ,'-File', scriptPath]);
 
   ps.stdout.on('data', (data) => {
