@@ -1,81 +1,159 @@
 # Constants
-$SampleInterval = 2
+
+# Sample Interval is the time in seconds between each sample
+$SampleInterval = 4
+
+# Max Number of Samples is the maximum number of samples to collect
 $MaxNumberOfSamples = 60
 
-# Identify Discrete GPU
-$GPU = Get-WmiObject Win32_VideoController
-$GPUDedicatedMemory = 0
+# Dictionary of GPUs
+$gpus = @{}
 
-# Identify Discrete GPU Dedicated Memory
-$GPUDedicatedMemory = 0
-foreach ($gpuItem in $GPU) {
-    switch ($gpuItem.Description) {
-        {$_ -match "Intel\(R\) Arc\(TM\) A770 Graphics"} {
-            $GPUDedicatedMemory = 16GB
-            break
+# Get GPU Adapter Memory and GPU Engine Counter Sets
+$gpuAdapterMemory = Get-counter -ListSet "GPU Adapter Memory"
+$gpuEngines = Get-counter -ListSet "GPU Engine"
+
+# Populate GPUs Dictionary
+$Pattern = "\((.*?)\)"
+foreach ($Match in [regex]::Matches($gpuAdapterMemory.PathsWithInstances, $Pattern)) {
+    
+    # Extract GPU Id
+    $id = $Match.Groups[1].Value
+
+    # Initialize GPU Memory and Engine Types
+    $gpus[$id] = @{
+        "MemoryTypes" = [System.Collections.Generic.List[string]]::new()
+        "EngineTypes" = [System.Collections.Generic.List[string]]::new()
+    }
+
+    # Set Memory Types
+    $gpus[$id]["MemoryTypes"].Add("Shared Usage") | Out-Null
+    $gpus[$id]["MemoryTypes"].Add("Dedicated Usage") | Out-Null
+    $gpus[$id]["MemoryTypes"].Add("Total Committed") | Out-Null
+
+    # Set Engine Types
+    $_gpuEngines = $gpuEngines.PathsWithInstances | Where-Object {$_ -match $id}
+    $Pattern = "_engtype_(.*?)\)"
+    foreach ($Match in [regex]::Matches($_gpuEngines, $Pattern)) {
+        if ($Match.Groups[1].Value -ne "") {
+            if (-not $gpus[$id]["EngineTypes"].Contains($Match.Groups[1].Value)) {
+                $gpus[$id]["EngineTypes"].Add($Match.Groups[1].Value) | Out-Null
+            }
         }
     }
 }
 
-# Exit if GPU Dedicated Memory is not found
-if ($GPUDedicatedMemory -eq 0) {
-    Write-Output "Can't identify GPU, options are:"
-    # Print the list of GPUs
-    Write-Output $GPU.Description
-    exit 1
-}
+# Initialize Counter Set
+$CounterSet = [System.Collections.Generic.List[string]]::new()
 
-# Identify GPU Id
-$GPUNonLocalAdapterMemoryCounters = Get-Counter -ListSet "GPU Non Local Adapter Memory"
-$Pattern = "0x0000[0-9A-Fa-f]{4}_phys"
-$Match = [regex]::Match($GPUNonLocalAdapterMemoryCounters.PathsWithInstances, $Pattern)
-
-if ($Match.Success) {
-    $GPUId = $Match.Value
-} else {
-    Write-Output "Can't find GPU Id"
-    exit 1
-}
-
-
-# Select Counters to Query
-$CounterSet = New-Object System.Collections.Generic.List[System.String]
+# Add Processor Utilization Counters
 $CounterSet.Add("\Processor Information(_Total)\% Processor Time")
+
+# Add Memory Utilization Counters
 $CounterSet.Add("\Memory\% Committed Bytes In Use")
-$CounterSet.Add("\GPU Adapter Memory(*_${GPUId}_*)\Dedicated Usage")
-$CounterSet.Add("\GPU Engine(*_${GPUId}_*_engtype_Compute)\Utilization Percentage")
-$CounterSet.Add("\GPU Engine(*_${GPUId}_*_engtype_Copy)\Utilization Percentage")
+
+# Add GPU Adapter Memory and GPU Engine Counters
+foreach ($id in $gpus.Keys) {
+
+    # Add GPU Adapter Memory Counters
+    foreach ($memoryType in $gpus[$id]["MemoryTypes"]) {
+        $CounterSet.Add("\GPU Adapter Memory(${id})\$memoryType")
+    }
+    
+    # Add GPU Engine Counters
+    foreach ($engineType in $gpus[$id]["EngineTypes"]) {
+        $CounterSet.Add("\GPU Engine(*_${id}_*_engtype_${engineType})\Utilization Percentage")
+    }
+}
+
+# Debug Counter Set
+foreach ($counter in $CounterSet) {
+    Write-Debug $counter
+}
 
 # Query Counters
-Get-Counter -Counter $CounterSet -MaxSamples $MaxNumberOfSamples -SampleInterval $SampleInterval -ErrorAction Stop | Foreach-Object {
+Get-Counter `
+    -Counter $CounterSet `
+    -MaxSamples $MaxNumberOfSamples `
+    -SampleInterval $SampleInterval `
+    -ErrorAction Stop | Foreach-Object {
 
-    # Get Per Counter Values
-    $ProcessorUsageValue = ($_.CounterSamples | Where-Object -Property Path -Match ".*processor information.*").CookedValue
-    $MemoryUsageValue = ($_.CounterSamples | Where-Object -Property Path -Match ".*committed bytes in use.*").CookedValue
-    $GPUDedicatedMemoryValues = ($_.CounterSamples | Where-Object -Property Path -Match ".*gpu adapter memory.*").CookedValue
-    $GPUEngineCopyValues = ($_.CounterSamples | Where-Object -Property Path -Match ".*gpu engine.*engtype_copy").CookedValue
-    $GPUEngineComputeValues = ($_.CounterSamples | Where-Object -Property Path -Match ".*gpu engine.*engtype_compute").CookedValue
+        # Initialize Metrics Dictionary
+        $metrics = @{}
 
-    # Sum Per Counter Values
-    $GPUDedicatedMemorySum = ($GPUDedicatedMemoryValues | Measure-Object -Sum).sum
-    $GPUEngineCopySum = ($GPUEngineCopyValues | Measure-Object -Sum).sum
-    $GPUEngineComputeSum = ($GPUEngineComputeValues | Measure-Object -Sum).sum
+        # Set Timestamp
+        $metrics["timestamp"] = [math]::Round(
+            (Get-Date $_.Timestamp).ToUniversalTime().Subtract(
+                (Get-Date "1970-01-01T00:00:00Z")
+            ).TotalSeconds
+        )
 
-    # Prepare Reporting Data
-    $ProcessorUsage = [math]::Round($ProcessorUsageValue,2)
-    $MemoryUsage = [math]::Round($MemoryUsageValue,2)
-    $GPUDedicatedMemoryUsage = [math]::Round(($GPUDedicatedMemorySum / $GPUDedicatedMemory) * 100,2)
-    $GPUEngineCopyUsage = [math]::Round($GPUEngineCopySum,2)
-    $GpuEngineComputeUsage = [math]::Round($GPUEngineComputeSum,2)
-    $Epoch = [DateTimeOffset]::Now.ToUnixTimeSeconds()
+        # Set Processor Utilization
+        $metrics["cpu-utilization"] = [math]::Round(
+            ($_.CounterSamples | 
+                Where-Object -Property Path -Match ".*processor information.*"
+            ).CookedValue, 
+            2
+        )
 
-    # Report Data
-    $output = "metrics "
-    $output += "cpu-usage-percent=$ProcessorUsage,"
-    $output += "memory-usage-percent=$MemoryUsage,"
-    $output += "gpu-dedicated-memory-percent=$GPUDedicatedMemoryUsage,"
-    $output += "gpu-copy-usage-percent=$GPUEngineCopyUsage,"
-    $output += "gpu-compute-usage-percent=$GpuEngineComputeUsage"
-    $output += " $($Epoch)"
-    Write-Output $output
+        # Set Memory Utilization
+        $metrics["memory-utilization"] = [math]::Round(
+            ($_.CounterSamples |
+                Where-Object -Property Path -Match ".*committed bytes in use.*"
+            ).CookedValue, 
+            2
+        )
+
+        # Set GPU Adapter Memory and GPU Engine Utilization
+        foreach ($id in $gpus.Keys) {
+
+            # Filter Counter Samples
+            $counterSamples = $_.CounterSamples | Where-Object -Property Path -Match ".*${id}.*"
+
+            # Set Memory Utilization
+            foreach ($memoryType in $gpus[$id]["MemoryTypes"]) {
+
+                # Gather value
+                $cookedValue = ($counterSamples | 
+                    Where-Object -Property Path -Match ".*$memoryType.*"
+                ).CookedValue
+
+                # Normalize name
+                $normalizedMemoryType = ($memoryType -replace " ", "-").ToLower()
+
+                # Save value
+                $metrics["gpu-${id}-memory-${normalizedMemoryType}"] = [math]::Round($cookedValue / 1GB, 2)
+            }
+
+            # Set Engine Utilization
+            foreach ($engineType in $gpus[$id]["EngineTypes"]) {
+
+                # Gather values
+                $cookedValue = ($counterSamples | 
+                    Where-Object -Property Path -Match ".*engtype_${engineType}"
+                ).CookedValue
+
+                # Sum values
+                $sum = ($cookedValue | Measure-Object -Sum).Sum
+
+                # Normalize name
+                $normalizedEngineType = ($engineType -replace " ", "-").ToLower()
+
+                # Save sum
+                $metrics["gpu-${id}-engine-${normalizedEngineType}"] = [math]::Round($sum, 2)
+            }
+        }
+
+        # Prepare Reporting Data
+        $output = "metrics "
+        $metrics.GetEnumerator() | Sort-Object Key | ForEach-Object {
+            if ($_.Key -ne "timestamp") {
+                $output += "$($_.Key)=$($_.Value),"
+            }
+        }
+        $output = $output.TrimEnd(",")
+        $output += " $($metrics["timestamp"])"
+
+        # Report Data
+        Write-Output $output
 }

@@ -32,19 +32,34 @@ export function setWindow(window: BrowserWindow) {
 }
 
 function processOutput(output: string) {
-  const pattern = /cpu-usage-percent=(?<cpu_usage>\d+(\.\d+)?),memory-usage-percent=(?<memory_usage>\d+(\.\d+)?),gpu-dedicated-memory-percent=(?<gpu_dedicated_memory_usage>\d+(\.\d+)?),gpu-copy-usage-percent=(?<gpu_copy_engine_usage>\d+(\.\d+)?),gpu-compute-usage-percent=(?<gpu_compute_engine_usage>\d+(\.\d+)?) (?<epoch>\d+)/;
-  const match = output.match(pattern);
   
-  if (match && match.groups) {
-    const metrics = {
-      cpu_usage_percent: parseFloat(match.groups.cpu_usage),
-      memory_usage_percent: parseFloat(match.groups.memory_usage),
-      gpu_dedicated_memory_percent: parseFloat(match.groups.gpu_dedicated_memory_usage),
-      gpu_copy_usage_percent: parseFloat(match.groups.gpu_copy_engine_usage),
-      gpu_compute_usage_percent: parseFloat(match.groups.gpu_compute_engine_usage),
-      epoch: parseInt(match.groups.epoch, 10),
-    };
+  // Split output by new line
+  const lines = output.split('\n');
 
+  // Process each line
+  lines.forEach((line) => {
+    
+    // Initialize metrics object
+    let metrics = {};
+
+    // Split line by space
+    const segments = line.split(' ');
+
+    // Check that the first segment is the "metrics" keyword
+    if (segments[0] !== 'metrics') {
+      return;
+    }
+
+    // Process each metric
+    segments[1].split(',').forEach((metric) => {
+      const [key, value] = metric.split('=');
+      metrics[key] = parseFloat(value);
+    });
+
+    // Add the timestamp
+    metrics['epoch'] = parseInt(segments[2], 10);
+
+    // Send the metrics to the renderer
     win?.webContents.send('metrics-data', metrics);
-  }
+  });
 }
